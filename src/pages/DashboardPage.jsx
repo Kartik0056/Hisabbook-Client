@@ -20,7 +20,9 @@ import {
   ArrowDownRight,
   ShieldAlert,
   Sparkles,
+  Pencil,
 } from 'lucide-react';
+import { EditBudgetModal } from '../components/modals/EditBudgetModal';
 import {
   ResponsiveContainer,
   BarChart,
@@ -43,6 +45,7 @@ export const DashboardPage = () => {
   const [loading, setLoading] = useState(true);
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
+  const [budgetModalOpen, setBudgetModalOpen] = useState(false);
 
   const fetchDashboard = async () => {
     if (!activeProject) return;
@@ -183,22 +186,46 @@ export const DashboardPage = () => {
           </div>
         </div>
 
-        {/* 4. Estimated Budget Remaining */}
-        <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm hover:shadow-md transition">
+        {/* 4. Estimated Budget Remaining / Project Budget */}
+        <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm hover:shadow-md transition relative group">
           <div className="flex items-center justify-between">
             <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">
-              {t('budgetRemaining')}
+              {fin.hasApprovedBudget ? t('budgetRemaining') : t('availableFunds')}
             </span>
-            <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-indigo-50 text-indigo-600">
-              <TrendingUp className="h-4 w-4" />
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => setBudgetModalOpen(true)}
+                title={fin.hasApprovedBudget ? t('editBudget') : t('setBudget')}
+                className="flex h-7 w-7 items-center justify-center rounded-lg text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 transition"
+              >
+                <Pencil className="h-3.5 w-3.5" />
+              </button>
+              <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-indigo-50 text-indigo-600">
+                <TrendingUp className="h-4 w-4" />
+              </div>
             </div>
           </div>
-          <div className={`mt-2 text-2xl font-black tracking-tight ${fin.estimatedBudgetRemaining < 0 ? 'text-rose-600' : 'text-slate-900'}`}>
-            {formatINR(fin.estimatedBudgetRemaining)}
+          <div className={`mt-2 text-2xl font-black tracking-tight ${
+            fin.hasApprovedBudget && fin.estimatedBudgetRemaining < 0 ? 'text-rose-600' : 'text-slate-900'
+          }`}>
+            {fin.hasApprovedBudget ? formatINR(fin.estimatedBudgetRemaining) : formatINR(fin.totalCashInHand)}
           </div>
           <div className="mt-1 flex items-center justify-between text-xs text-slate-500">
-            <span>Approved Budget: {formatINR(fin.revisedBudget)}</span>
-            <span className="font-semibold text-blue-600">{fin.budgetUtilizationPercent}%</span>
+            {fin.hasApprovedBudget ? (
+              <>
+                <span>Approved Budget: {formatINR(fin.revisedBudget)}</span>
+                <span className="font-semibold text-blue-600">{fin.budgetUtilizationPercent}%</span>
+              </>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setBudgetModalOpen(true)}
+                className="text-[11px] font-bold text-indigo-600 hover:text-indigo-800 transition flex items-center gap-1 underline underline-offset-2"
+              >
+                + {t('setBudget')} (Approved Budget)
+              </button>
+            )}
           </div>
         </div>
 
@@ -515,6 +542,15 @@ export const DashboardPage = () => {
           </div>
         </div>
       </div>
+
+      {/* Edit Budget Modal */}
+      <EditBudgetModal
+        isOpen={budgetModalOpen}
+        onClose={() => setBudgetModalOpen(false)}
+        currentBudget={fin?.revisedBudget || 0}
+        totalFunds={fin?.totalCashInHand || 0}
+        onSaved={fetchDashboard}
+      />
     </div>
   );
 };

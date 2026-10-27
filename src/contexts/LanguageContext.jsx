@@ -26,6 +26,10 @@ const translations = {
   budgetRemaining: { en: 'Budget Remaining', hi: 'बचा हुआ बजट' },
   cashInHand: { en: 'Cash in Hand (Total)', hi: 'कुल उपलब्ध रोकड़' },
   budgetUtilization: { en: 'Budget Utilization', hi: 'बजट उपयोग' },
+  setBudget: { en: 'Set Budget', hi: 'बजट सेट करें' },
+  editBudget: { en: 'Edit Budget', hi: 'बजट बदलें' },
+  noBudgetSet: { en: 'No Budget Configured', hi: 'स्वीकृत बजट सेट नहीं है' },
+  availableFunds: { en: 'Available Funds (Cash/Bank)', hi: 'उपलब्ध फंड (रोकड़/बैंक)' },
 
   // Actions
   addTransaction: { en: 'New Entry', hi: 'नई एंट्री' },
@@ -343,6 +347,18 @@ const translations = {
   viewDateWise: { en: 'Date-wise Details', hi: 'तारीख-वार विवरण' },
   dateWiseLog: { en: 'Date-wise Delivery Log', hi: 'तारीख-वार डिलीवरी रजिस्टर' },
   materialGroupSummary: { en: 'Material Grouped Summary', hi: 'सामग्री-वार कुल सारांश' },
+  // Contractor Advance Payment Source & Adjustments
+  paymentSourcePrompt: { en: 'Whose money was used for this?', hi: 'इसके पैसे किसपे गए / कहाँ से गए?' },
+  directCompanyAccount: { en: 'Direct Company Cash/Bank (New Expense)', hi: 'सीधा कंपनी भुगतान (कैश / बैंक)' },
+  deductFromContractorAdvance: { en: 'Deduct from Contractor Advance', hi: 'ठेकेदार के पुराने एडवांस में से कटा' },
+  newPaymentToContractor: { en: 'New Payment to Contractor', hi: 'ठेकेदार को अभी नया भुगतान दिया' },
+  selectContractorToDeduct: { en: 'Select Contractor / Person', hi: 'ठेकेदार चुनें (जिनके एडवांस से कटेगा)' },
+  availableAdvanceBalance: { en: 'Available Advance Balance', hi: 'ठेकेदार के पास उपलब्ध एडवांस' },
+  advanceNoticeTip: {
+    en: 'This amount will NOT be deducted from your bank/cash balance again. It adjusts the contractor’s existing advance.',
+    hi: 'यह राशि आपके बैंक/कैश खाते से दोबारा नहीं कटेगी, बल्कि ठेकेदार के पिछले दिए एडवांस में से घटेगी।',
+  },
+  adjustedFromAdvanceBadge: { en: 'Contractor Advance Adjusted', hi: 'ठेकेदार एडवांस से समायोजित' },
 
   // Language Toggle
   switchLang: { en: 'हिंदी', hi: 'English' },

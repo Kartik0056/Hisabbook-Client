@@ -27,6 +27,10 @@ import {
   Pencil,
   Trash2,
   Boxes,
+  HandCoins,
+  Wallet,
+  ShieldCheck,
+  Zap,
 } from 'lucide-react';
 
 export const TransactionsPage = () => {
@@ -76,7 +80,13 @@ export const TransactionsPage = () => {
     ratePerUnit: '',
     vehicleNumber: '',
     challanNumber: '',
+    paymentSourceType: 'direct_account', // 'direct_account' | 'contractor_advance'
+    contractor: '',
   });
+
+  const [advances, setAdvances] = useState([]);
+  const [contactPayments, setContactPayments] = useState([]);
+  const [loadingContactPayments, setLoadingContactPayments] = useState(false);
 
   // Form State
   const [formData, setFormData] = useState({
@@ -86,6 +96,7 @@ export const TransactionsPage = () => {
     account: '',
     toAccount: '',
     contact: '',
+    linkedAdvance: '',
     category: 'General',
     subcategory: '',
     description: '',
@@ -120,10 +131,11 @@ export const TransactionsPage = () => {
       if (startDate) params.startDate = startDate;
       if (endDate) params.endDate = endDate;
 
-      const [txnRes, accRes, conRes] = await Promise.all([
+      const [txnRes, accRes, conRes, advRes] = await Promise.all([
         api.getTransactions(params),
         api.getAccounts(),
         api.getContacts(),
+        api.getAdvances(),
       ]);
 
       if (txnRes.success) {
@@ -132,6 +144,7 @@ export const TransactionsPage = () => {
       }
       if (accRes.success) setAccounts(accRes.data);
       if (conRes.success) setContacts(conRes.data);
+      if (advRes.success) setAdvances(advRes.data);
     } catch (err) {
       console.error('Error fetching transactions:', err);
     } finally {
@@ -143,6 +156,102 @@ export const TransactionsPage = () => {
     loadData();
   }, [activeProject?._id, typeFilter, accountFilter, contactFilter, startDate, endDate]);
 
+  // Compute contractor advance balances
+  const contractorAdvanceMap = {};
+  advances.forEach((adv) => {
+    if (!adv.isCancelled && adv.contact) {
+      const cId = adv.contact._id || adv.contact;
+      const unsettled =
+        adv.advanceDetails?.unsettledAmount ??
+        (adv.amount - (adv.advanceDetails?.settledAmount || 0));
+      contractorAdvanceMap[cId] = (contractorAdvanceMap[cId] || 0) + unsettled;
+    }
+  });
+
+  const fetchContactPayments = async (contactId) => {
+    if (!contactId) {
+      setContactPayments([]);
+      return;
+    }
+    setLoadingContactPayments(true);
+    try {
+      // Seed immediately from in-memory advances and transactions for zero delay
+      const local = [
+        ...advances.filter((a) => (a.contact?._id || a.contact) === contactId),
+        ...transactions.filter(
+          (t) =>
+            (t.contact?._id || t.contact) === contactId &&
+            !t.isAdjustedFromAdvance &&
+            !t.isCancelled &&
+            (t.type === 'advance' || t.type === 'contractor_payment' || t.type === 'expense' || t.isAdvance)
+        ),
+      ];
+      const seen = new Set();
+      const uniqueLocal = local.filter((item) => {
+        if (!item._id || seen.has(item._id)) return false;
+        seen.add(item._id);
+        return true;
+      });
+      setContactPayments(uniqueLocal);
+
+      // Fetch comprehensive contact transactions from API
+      const res = await api.getTransactions({ contact: contactId, limit: 100 });
+      if (res.success && Array.isArray(res.data)) {
+        const serverFiltered = res.data.filter(
+          (t) =>
+            !t.isCancelled &&
+            !t.isAdjustedFromAdvance &&
+            (t.type === 'advance' || t.type === 'contractor_payment' || t.type === 'expense' || t.isAdvance)
+        );
+        const map = new Map();
+        uniqueLocal.forEach((item) => map.set(item._id, item));
+        serverFiltered.forEach((item) => map.set(item._id, item));
+        const combined = Array.from(map.values()).sort(
+          (a, b) => new Date(b.date) - new Date(a.date)
+        );
+        setContactPayments(combined);
+      }
+    } catch (err) {
+      console.error('Error fetching contact payments:', err);
+    } finally {
+      setLoadingContactPayments(false);
+    }
+  };
+
+  const handleContactChange = (contactId) => {
+    setFormData((prev) => ({
+      ...prev,
+      contact: contactId,
+      linkedAdvance: '',
+    }));
+    if (isMaterialEntry) {
+      setMaterialForm((prev) => ({
+        ...prev,
+        contractor: contactId,
+      }));
+    }
+    fetchContactPayments(contactId);
+  };
+
+  const handleLinkedTxnSelect = (txnId) => {
+    setFormData((prev) => ({
+      ...prev,
+      linkedAdvance: txnId,
+    }));
+    if (txnId) {
+      setMaterialForm((prev) => ({
+        ...prev,
+        paymentSourceType: 'contractor_advance',
+        contractor: formData.contact || prev.contractor,
+      }));
+    } else {
+      setMaterialForm((prev) => ({
+        ...prev,
+        paymentSourceType: 'direct_account',
+      }));
+    }
+  };
+
   const openAddModal = (draft = null, isEdit = false) => {
     setIsEditMode(isEdit);
     setEditingTxnId(isEdit && draft ? draft._id : null);
@@ -150,13 +259,16 @@ export const TransactionsPage = () => {
     const defaultAcc = accounts.find((a) => a.isDefault)?._id || accounts[0]?._id || '';
 
     if (draft) {
+      const draftContactId = draft.contact?._id || draft.contact || '';
+      const draftLinkedAdv = draft.linkedAdvance?._id || draft.linkedAdvance || '';
       setFormData({
         type: draft.type || 'expense',
         amount: draft.amount || '',
         date: draft.date ? new Date(draft.date).toISOString().slice(0, 10) : new Date().toISOString().slice(0, 10),
         account: draft.account?._id || draft.account || defaultAcc,
         toAccount: draft.toAccount?._id || draft.toAccount || '',
-        contact: draft.contact?._id || draft.contact || '',
+        contact: draftContactId,
+        linkedAdvance: draftLinkedAdv,
         category: draft.category || 'General',
         subcategory: draft.subcategory || '',
         description: draft.description || '',
@@ -164,9 +276,15 @@ export const TransactionsPage = () => {
         paymentMethod: draft.paymentMethod || 'cash',
         referenceNumber: draft.referenceNumber || '',
         notes: draft.notes || '',
-        isAdvance: draft.isAdvance || false,
+        isAdvance: Boolean(draft.isAdvance || draft.type === 'advance'),
         idempotencyKey: randomKey,
       });
+
+      if (draftContactId) {
+        fetchContactPayments(draftContactId);
+      } else {
+        setContactPayments([]);
+      }
 
       if (draft.materialDetails?.isMaterial) {
         setIsMaterialEntry(true);
@@ -178,6 +296,8 @@ export const TransactionsPage = () => {
           ratePerUnit: draft.materialDetails.ratePerUnit !== undefined ? draft.materialDetails.ratePerUnit : '',
           vehicleNumber: draft.materialDetails.vehicleNumber || '',
           challanNumber: draft.materialDetails.challanNumber || '',
+          paymentSourceType: draft.paymentSourceType || draft.materialDetails.paymentSourceType || (draftLinkedAdv ? 'contractor_advance' : 'direct_account'),
+          contractor: draftContactId || draft.materialDetails.contractor || '',
         });
       } else {
         setIsMaterialEntry(false);
@@ -189,6 +309,8 @@ export const TransactionsPage = () => {
           ratePerUnit: '',
           vehicleNumber: '',
           challanNumber: '',
+          paymentSourceType: draftLinkedAdv ? 'contractor_advance' : 'direct_account',
+          contractor: draftContactId,
         });
       }
     } else {
@@ -199,6 +321,7 @@ export const TransactionsPage = () => {
         account: defaultAcc,
         toAccount: '',
         contact: '',
+        linkedAdvance: '',
         category: 'General',
         subcategory: '',
         description: '',
@@ -209,6 +332,7 @@ export const TransactionsPage = () => {
         isAdvance: false,
         idempotencyKey: randomKey,
       });
+      setContactPayments([]);
       setIsMaterialEntry(false);
       setMaterialForm({
         materialName: '',
@@ -218,6 +342,8 @@ export const TransactionsPage = () => {
         ratePerUnit: '',
         vehicleNumber: '',
         challanNumber: '',
+        paymentSourceType: 'direct_account',
+        contractor: '',
       });
     }
     setCapturedFiles([]);
@@ -231,7 +357,54 @@ export const TransactionsPage = () => {
       setFormError(t('enterValidAmount'));
       return;
     }
-    if (!formData.account) {
+
+    const isFromAdv =
+      (isMaterialEntry && materialForm.paymentSourceType === 'contractor_advance') ||
+      Boolean(formData.linkedAdvance);
+
+    const chosenTxn = formData.linkedAdvance
+      ? contactPayments.find((p) => p._id === formData.linkedAdvance)
+      : null;
+
+    if (isFromAdv) {
+      const targetContact = materialForm.contractor || formData.contact;
+      if (!targetContact) {
+        setFormError(
+          language === 'hi'
+            ? 'कृपया ठेकेदार / व्यक्ति चुनें जिनके पहले दिए गए भुगतान/एडवांस में से यह राशि काटी जानी है।'
+            : 'Please select contractor to deduct from advance.'
+        );
+        return;
+      }
+
+      const availableAdv = chosenTxn
+        ? (chosenTxn.advanceDetails?.unsettledAmount !== undefined
+            ? chosenTxn.advanceDetails.unsettledAmount
+            : chosenTxn.amount - (chosenTxn.advanceDetails?.settledAmount || 0))
+        : (contractorAdvanceMap[targetContact] || 0);
+
+      if (availableAdv <= 0) {
+        setFormError(
+          language === 'hi'
+            ? 'इस ठेकेदार के पास कोई बकाया/खुला एडवांस उपलब्ध नहीं है। कृपया सीधा भुगतान चुनें।'
+            : 'This contractor has no available advance balance.'
+        );
+        return;
+      }
+
+      const totalAmt = Number(formData.amount) || 0;
+      const remainderFromAccount = Math.max(0, totalAmt - availableAdv);
+
+      // If advance is less than expense amount, remind to select account for remaining difference
+      if (remainderFromAccount > 0 && !formData.account) {
+        setFormError(
+          language === 'hi'
+            ? `एडवांस में ₹${availableAdv.toLocaleString('en-IN')} उपलब्ध है। बाकी बचा अंतर (₹${remainderFromAccount.toLocaleString('en-IN')}) काटने के लिए कृपया बैंक/रोकड़ खाता चुनें।`
+            : `Please select account to deduct remaining ₹${remainderFromAccount.toLocaleString('en-IN')}.`
+        );
+        return;
+      }
+    } else if (!formData.account) {
       setFormError(t('selectPaymentAccount'));
       return;
     }
@@ -256,6 +429,9 @@ export const TransactionsPage = () => {
 
       // Prepare material details if toggled
       let materialPayload = { isMaterial: false };
+      const contractorObj = contacts.find((c) => c._id === (materialForm.contractor || formData.contact));
+      const contractorName = contractorObj?.name || '';
+
       if (isMaterialEntry && materialForm.materialName?.trim()) {
         const qty = Number(materialForm.quantity) || 0;
         const rate = Number(materialForm.ratePerUnit) || 0;
@@ -269,12 +445,32 @@ export const TransactionsPage = () => {
           totalMaterialCost: qty * rate > 0 ? qty * rate : Number(formData.amount),
           vehicleNumber: materialForm.vehicleNumber || '',
           challanNumber: materialForm.challanNumber || '',
+          paymentSourceType: isFromAdv ? 'contractor_advance' : (materialForm.paymentSourceType || 'direct_account'),
+          isAdjustedFromAdvance: isFromAdv,
+          contractor: isFromAdv ? (materialForm.contractor || formData.contact) : null,
+          contractorName: contractorName,
         };
       }
 
+      const defaultAcc = accounts.find((a) => a.isDefault)?._id || accounts[0]?._id || '';
+      const submissionPayload = {
+        ...formData,
+        account: formData.account || defaultAcc,
+        contact: isFromAdv ? (materialForm.contractor || formData.contact) : formData.contact,
+        linkedAdvance: formData.linkedAdvance || null,
+        paymentSourceType: isFromAdv ? 'contractor_advance' : 'direct_account',
+        isAdjustedFromAdvance: isFromAdv,
+        contractor: isFromAdv ? (materialForm.contractor || formData.contact) : null,
+        description:
+          formData.description ||
+          (isFromAdv
+            ? `Material Inward: ${materialForm.materialName || 'सामग्री'} (ठेकेदार एडवांस से समायोजित - ${contractorName})`
+            : ''),
+      };
+
       if (isEditMode && editingTxnId) {
         const updatePayload = {
-          ...formData,
+          ...submissionPayload,
           amount: Number(formData.amount),
           materialDetails: materialPayload,
         };
@@ -291,7 +487,7 @@ export const TransactionsPage = () => {
         }
       } else {
         const res = await api.createTransaction({
-          ...formData,
+          ...submissionPayload,
           amount: Number(formData.amount),
           materialDetails: materialPayload,
           attachments: attachmentIds,
@@ -611,15 +807,19 @@ export const TransactionsPage = () => {
                               : isInflow
                               ? 'bg-emerald-50 text-emerald-700'
                               : txn.isAdvance
-                              ? 'bg-amber-100 text-amber-800'
+                              ? 'bg-amber-100 text-amber-900 border border-amber-300'
                               : 'bg-slate-100 text-slate-700'
                           }`}
                         >
-                          {isCancelled ? t('cancelled') : getTypeLabel(txn.type)}
+                          {isCancelled
+                            ? t('cancelled')
+                            : txn.isAdvance
+                            ? (language === 'hi' ? 'पेशगी (एडवांस)' : 'Advance')
+                            : getTypeLabel(txn.type)}
                         </span>
                         {txn.isAdvance && !isCancelled && (
                           <div className="text-[9px] text-amber-700 font-semibold mt-0.5">
-                            {t('unsettled')}: {formatINR(txn.advanceDetails?.unsettledAmount)}
+                            {t('unsettled')}: {formatINR(txn.advanceDetails?.unsettledAmount ?? txn.amount)}
                           </div>
                         )}
                       </td>
@@ -644,14 +844,59 @@ export const TransactionsPage = () => {
 
                       {/* Account & Contact */}
                       <td className="px-4 py-3 whitespace-nowrap">
-                        <div className="font-medium text-slate-700 flex items-center gap-1">
-                          <Building className="h-3 w-3 text-slate-400" />
-                          <span>{txn.account?.name || t('account')}</span>
-                        </div>
-                        {txn.contact && (
-                          <div className="text-[10px] text-blue-600 flex items-center gap-1 mt-0.5">
-                            <User className="h-3 w-3" />
-                            <span>{txn.contact.name}</span>
+                        {txn.isAdjustedFromAdvance ? (
+                          <div>
+                            {txn.directPaidAmount > 0 ? (
+                              <div>
+                                <span className="inline-flex items-center gap-1 rounded-md bg-amber-100 px-2 py-0.5 text-[10px] font-bold text-amber-900 border border-amber-300">
+                                  <Zap className="h-3 w-3 text-amber-600" />
+                                  <span>{language === 'hi' ? '⚡ आंशिक एडवांस (Split)' : 'Split Advance'}</span>
+                                </span>
+                                <div className="text-[10px] text-amber-900 font-semibold mt-0.5 flex items-center gap-1">
+                                  <span className="text-purple-700">Adv: {formatINR(txn.advanceDeductedAmount || (txn.amount - txn.directPaidAmount))}</span>
+                                  <span>+</span>
+                                  <span className="text-amber-800">खाता: {formatINR(txn.directPaidAmount)}</span>
+                                </div>
+                                <div className="text-[9px] text-slate-500 font-medium">
+                                  {txn.account?.name || 'कंपनी खाता'}
+                                </div>
+                                {txn.contact && (
+                                  <div className="text-[10px] text-slate-700 font-medium flex items-center gap-1 mt-0.5">
+                                    <User className="h-3 w-3 text-slate-400" />
+                                    <span>{txn.contact.name}</span>
+                                  </div>
+                                )}
+                              </div>
+                            ) : (
+                              <div>
+                                <span className="inline-flex items-center gap-1 rounded-md bg-purple-100 px-2 py-0.5 text-[10px] font-bold text-purple-900 border border-purple-200">
+                                  <HandCoins className="h-3 w-3 text-purple-700" />
+                                  <span>{language === 'hi' ? 'ठेकेदार एडवांस से पूरा कटा' : 'Advance Adjusted'}</span>
+                                </span>
+                                {txn.contact && (
+                                  <div className="text-[10px] text-purple-800 font-semibold flex items-center gap-1 mt-0.5">
+                                    <User className="h-3 w-3" />
+                                    <span>{txn.contact.name}</span>
+                                  </div>
+                                )}
+                                <div className="text-[9px] text-purple-600 mt-0.5">
+                                  {language === 'hi' ? '(बैंक/कैश से नहीं कटा)' : '(Not from bank)'}
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        ) : (
+                          <div>
+                            <div className="font-medium text-slate-700 flex items-center gap-1">
+                              <Building className="h-3 w-3 text-slate-400" />
+                              <span>{txn.account?.name || t('account')}</span>
+                            </div>
+                            {txn.contact && (
+                              <div className="text-[10px] text-blue-600 flex items-center gap-1 mt-0.5">
+                                <User className="h-3 w-3" />
+                                <span>{txn.contact.name}</span>
+                              </div>
+                            )}
                           </div>
                         )}
                       </td>
@@ -678,7 +923,20 @@ export const TransactionsPage = () => {
                             : 'text-slate-900'
                         }`}
                       >
-                        {isInflow ? '+' : '-'} {formatINR(txn.amount)}
+                        <div>{isInflow ? '+' : '-'} {formatINR(txn.amount)}</div>
+                        {txn.isAdjustedFromAdvance && !isCancelled && (
+                          <div className="text-[10px] font-normal mt-0.5">
+                            {txn.directPaidAmount > 0 ? (
+                              <div className="text-amber-800 font-semibold">
+                                <span className="text-purple-700 font-bold">Adv: -{formatINR(txn.advanceDeductedAmount || (txn.amount - txn.directPaidAmount))}</span>
+                                <br />
+                                <span className="text-rose-600 font-bold">बजट: -{formatINR(txn.directPaidAmount)}</span>
+                              </div>
+                            ) : (
+                              <span className="text-purple-600 font-medium">({language === 'hi' ? 'पूरा एडवांस से' : '100% advance'})</span>
+                            )}
+                          </div>
+                        )}
                       </td>
 
                       {/* Action Menu */}
@@ -857,18 +1115,32 @@ export const TransactionsPage = () => {
 
               {/* Advance Checkbox */}
               {formData.type !== 'income' && formData.type !== 'transfer' && (
-                <div className="flex items-start gap-2.5 rounded-xl border border-amber-200 bg-amber-50/50 p-3">
+                <div
+                  onClick={() => setFormData((prev) => ({ ...prev, isAdvance: !prev.isAdvance }))}
+                  className={`flex items-start gap-3 rounded-2xl border p-3.5 cursor-pointer transition select-none ${
+                    formData.isAdvance
+                      ? 'border-amber-400 bg-amber-100/70 shadow-sm ring-2 ring-amber-300'
+                      : 'border-amber-200 bg-amber-50/50 hover:bg-amber-100/50'
+                  }`}
+                >
                   <input
                     type="checkbox"
                     id="isAdvCheck"
-                    checked={formData.isAdvance}
-                    onChange={(e) => setFormData({ ...formData, isAdvance: e.target.checked })}
-                    className="h-4 w-4 mt-0.5 rounded text-blue-600 focus:ring-blue-500"
+                    checked={Boolean(formData.isAdvance)}
+                    onChange={() => {}}
+                    className="h-4 w-4 mt-0.5 rounded text-amber-600 focus:ring-amber-500 cursor-pointer pointer-events-none"
                   />
-                  <label htmlFor="isAdvCheck" className="cursor-pointer">
-                    <div className="text-xs font-bold text-amber-900">{t('markAdvance')}</div>
+                  <div className="flex-1">
+                    <div className="text-xs font-bold text-amber-900 flex items-center gap-1.5">
+                      <span>{t('markAdvance')}</span>
+                      {formData.isAdvance && (
+                        <span className="rounded-full bg-amber-200 px-2 py-0.5 text-[10px] font-extrabold text-amber-900">
+                          ✓ {language === 'hi' ? 'एडवांस चिह्नित' : 'Advance Active'}
+                        </span>
+                      )}
+                    </div>
                     <div className="text-[11px] text-amber-700 mt-0.5">{t('markAdvanceHint')}</div>
-                  </label>
+                  </div>
                 </div>
               )}
 
@@ -1136,6 +1408,240 @@ export const TransactionsPage = () => {
                           />
                         </div>
                       </div>
+
+                      {/* Payment / Funding Source for this Material Inward */}
+                      <div className="rounded-xl border border-amber-300 bg-white p-3 space-y-2.5">
+                        <label className="block text-[11px] font-bold text-slate-800 flex items-center gap-1.5">
+                          <HandCoins className="h-3.5 w-3.5 text-amber-700" />
+                          <span>{language === 'hi' ? 'इसके पैसे किसपे गए / कहाँ से गए? *' : 'Payment / Funding Source *'}</span>
+                        </label>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setMaterialForm({
+                                ...materialForm,
+                                paymentSourceType: 'direct_account',
+                                contractor: '',
+                              })
+                            }
+                            className={`flex items-center gap-2 p-2 rounded-xl border text-left text-xs transition ${
+                              materialForm.paymentSourceType === 'direct_account'
+                                ? 'border-emerald-600 bg-emerald-50 text-emerald-950 font-bold ring-1 ring-emerald-500'
+                                : 'border-slate-200 bg-slate-50 text-slate-700'
+                            }`}
+                          >
+                            <Wallet className="h-4 w-4 text-emerald-600 shrink-0" />
+                            <div>
+                              <div>{language === 'hi' ? 'सीधा कंपनी खाता (नया खर्च)' : 'Direct Company Payment'}</div>
+                              <div className="text-[10px] text-slate-500 font-normal">
+                                {language === 'hi' ? 'बैंक/कैश खाते से कटेगा' : 'Deducts from account'}
+                              </div>
+                            </div>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setMaterialForm({
+                                ...materialForm,
+                                paymentSourceType: 'contractor_advance',
+                              })
+                            }
+                            className={`flex items-center gap-2 p-2 rounded-xl border text-left text-xs transition ${
+                              materialForm.paymentSourceType === 'contractor_advance'
+                                ? 'border-purple-600 bg-purple-50 text-purple-950 font-bold ring-1 ring-purple-500'
+                                : 'border-slate-200 bg-slate-50 text-slate-700'
+                            }`}
+                          >
+                            <HandCoins className="h-4 w-4 text-purple-600 shrink-0" />
+                            <div>
+                              <div>{language === 'hi' ? 'ठेकेदार के पुराने एडवांस में से' : 'From Contractor Advance'}</div>
+                              <div className="text-[10px] text-purple-700 font-normal">
+                                {language === 'hi' ? 'बजट/बैंक से दोबारा नहीं कटेगा' : 'No double deduction'}
+                              </div>
+                            </div>
+                          </button>
+                        </div>
+
+                        {/* When Contractor Advance is selected */}
+                        {materialForm.paymentSourceType === 'contractor_advance' && (
+                          <div className="rounded-xl border border-purple-200 bg-purple-50/70 p-2.5 space-y-2.5">
+                            <div>
+                              <label className="block text-[11px] font-bold text-purple-950 mb-1">
+                                {language === 'hi' ? 'ठेकेदार / व्यक्ति चुनें *' : 'Select Contractor *'}
+                              </label>
+                              <select
+                                required
+                                value={materialForm.contractor}
+                                onChange={(e) => {
+                                  const cId = e.target.value;
+                                  setMaterialForm({ ...materialForm, contractor: cId });
+                                  if (cId) {
+                                    setFormData((f) => ({ ...f, contact: cId, linkedAdvance: '' }));
+                                    fetchContactPayments(cId);
+                                  }
+                                }}
+                                className="w-full rounded-lg border border-purple-300 bg-white px-2.5 py-1.5 text-xs font-bold text-slate-800 outline-none"
+                              >
+                                <option value="">{language === 'hi' ? '-- ठेकेदार चुनें --' : '-- Select Contractor --'}</option>
+                                {contacts.map((c) => {
+                                  const advBal = contractorAdvanceMap[c._id] || 0;
+                                  return (
+                                    <option key={c._id} value={c._id}>
+                                      {c.name} {c.role ? `(${c.role})` : ''} — {language === 'hi' ? 'उपलब्ध एडवांस:' : 'Adv:'} {formatINR(advBal)}
+                                    </option>
+                                  );
+                                })}
+                              </select>
+                            </div>
+
+                            {materialForm.contractor && (
+                              <div>
+                                <label className="block text-[11px] font-bold text-purple-950 mb-1 flex items-center justify-between">
+                                  <span>{language === 'hi' ? 'किस एडवांस में से काटना है?' : 'Select Specific Advance (or Auto)'}</span>
+                                  <span className="text-[10px] text-purple-700 font-normal">
+                                    {language === 'hi' ? '(वैकल्पिक / Optional)' : '(Optional)'}
+                                  </span>
+                                </label>
+                                <select
+                                  value={formData.linkedAdvance || ''}
+                                  onChange={(e) => setFormData((f) => ({ ...f, linkedAdvance: e.target.value }))}
+                                  className="w-full rounded-lg border border-purple-300 bg-white px-2.5 py-1.5 text-xs font-bold text-slate-800 outline-none"
+                                >
+                                  <option value="">
+                                    {language === 'hi'
+                                      ? `⚡ ऑटो-एडजस्ट (खुले एडवांस से काटें - कुल: ${formatINR(contractorAdvanceMap[materialForm.contractor] || 0)})`
+                                      : `⚡ Auto-adjust from open advances (Total: ${formatINR(contractorAdvanceMap[materialForm.contractor] || 0)})`}
+                                  </option>
+                                  {contactPayments
+                                    .filter((p) => {
+                                      const un =
+                                        p.advanceDetails?.unsettledAmount !== undefined
+                                          ? p.advanceDetails.unsettledAmount
+                                          : (p.amount - (p.advanceDetails?.settledAmount || 0));
+                                      return (p.isAdvance || p.type === 'advance') && un > 0;
+                                    })
+                                    .map((p) => {
+                                      const un =
+                                        p.advanceDetails?.unsettledAmount !== undefined
+                                          ? p.advanceDetails.unsettledAmount
+                                          : (p.amount - (p.advanceDetails?.settledAmount || 0));
+                                      const d = p.date
+                                        ? new Date(p.date).toLocaleDateString('en-IN', {
+                                            day: '2-digit',
+                                            month: 'short',
+                                          })
+                                        : '';
+                                      return (
+                                        <option key={p._id} value={p._id}>
+                                          📅 {d} — {p.transactionId} : मूल {formatINR(p.amount)} [शेष खुला: {formatINR(un)}]
+                                        </option>
+                                      );
+                                    })}
+                                </select>
+                              </div>
+                            )}
+
+                            {materialForm.contractor && (() => {
+                              const chosenAdv = formData.linkedAdvance
+                                ? contactPayments.find((p) => p._id === formData.linkedAdvance)
+                                : null;
+                              const availableForDeduction = chosenAdv
+                                ? (chosenAdv.advanceDetails?.unsettledAmount !== undefined
+                                    ? chosenAdv.advanceDetails.unsettledAmount
+                                    : chosenAdv.amount - (chosenAdv.advanceDetails?.settledAmount || 0))
+                                : (contractorAdvanceMap[materialForm.contractor] || 0);
+                              const cost = Number(formData.amount) || 0;
+                              const fromAdv = Math.min(availableForDeduction, cost);
+                              const fromAccount = Math.max(0, cost - availableForDeduction);
+                              const remAfter = Math.max(0, availableForDeduction - cost);
+                              const selectedAccountObj = accounts.find((a) => a._id === formData.account);
+
+                              return (
+                                <div className="space-y-2">
+                                  <div className="bg-white rounded-lg p-2.5 border border-purple-200 text-xs space-y-1.5 shadow-xs">
+                                    <div className="flex items-center justify-between">
+                                      <span className="text-slate-600">
+                                        {chosenAdv
+                                          ? (language === 'hi' ? 'चुने गए एडवांस का खुला बैलेंस:' : 'Selected Advance Balance:')
+                                          : (language === 'hi' ? 'ठेकेदार के पास कुल उपलब्ध एडवांस:' : 'Contractor Total Open Adv:')}
+                                      </span>
+                                      <span className="font-bold text-purple-900">
+                                        {formatINR(availableForDeduction)}
+                                      </span>
+                                    </div>
+
+                                    {cost > 0 && fromAccount === 0 && (
+                                      <>
+                                        <div className="flex items-center justify-between text-purple-900">
+                                          <span>{language === 'hi' ? 'सामान का खर्च (एडवांस से पूरा कटेगा):' : 'Material Cost (Full from Adv):'}</span>
+                                          <span className="font-bold">- {formatINR(cost)}</span>
+                                        </div>
+                                        <div className="pt-1 border-t border-purple-100 flex items-center justify-between">
+                                          <span className="font-bold text-slate-800">{language === 'hi' ? 'बाकी बचेगा एडवांस:' : 'Remaining Adv:'}</span>
+                                          <span className="font-black text-emerald-700">
+                                            {formatINR(remAfter)}
+                                          </span>
+                                        </div>
+                                        <div className="rounded bg-emerald-50 p-1.5 text-[10px] text-emerald-900 font-medium flex items-center gap-1.5 mt-1 border border-emerald-100">
+                                          <ShieldCheck className="h-3.5 w-3.5 text-emerald-600 shrink-0" />
+                                          <span>
+                                            {language === 'hi'
+                                              ? '✓ यह पूरी राशि ठेकेदार के एडवांस से कटेगी। कंपनी बैंक/कैश खाते से कुछ नहीं कटेगा।'
+                                              : '✓ Fully covered by advance. No double deduction from accounts.'}
+                                          </span>
+                                        </div>
+                                      </>
+                                    )}
+                                  </div>
+
+                                  {/* Split Payment Card if material cost exceeds available advance */}
+                                  {cost > 0 && fromAccount > 0 && (
+                                    <div className="rounded-xl border border-amber-300 bg-gradient-to-br from-amber-50 to-orange-50/50 p-3 space-y-2 text-xs shadow-xs">
+                                      <div className="flex items-center justify-between font-bold text-amber-950 text-[11px] pb-1 border-b border-amber-200">
+                                        <span className="flex items-center gap-1.5">
+                                          <Zap className="h-4 w-4 text-amber-600 shrink-0" />
+                                          <span>{language === 'hi' ? '⚡ आंशिक एडवांस समायोजन (Split Payment)' : '⚡ Split Advance + Account Payment'}</span>
+                                        </span>
+                                        <span className="rounded-full bg-amber-200 px-2 py-0.5 text-[10px] font-extrabold text-amber-900">
+                                          {language === 'hi' ? 'एडवांस कम है' : 'Advance insufficient'}
+                                        </span>
+                                      </div>
+
+                                      <div className="space-y-1.5">
+                                        <div className="flex justify-between items-center text-slate-700 font-medium">
+                                          <span>{language === 'hi' ? 'कुल सामान की रकम:' : 'Total Cost:'}</span>
+                                          <span className="font-black text-slate-900">{formatINR(cost)}</span>
+                                        </div>
+                                        <div className="flex justify-between items-center text-purple-900 font-semibold bg-purple-100/70 px-2 py-1 rounded-md">
+                                          <span>🟣 {language === 'hi' ? 'ठेकेदार के बचे एडवांस से कटेगा:' : 'Deducted from Advance:'}</span>
+                                          <span className="font-extrabold text-purple-950">- {formatINR(fromAdv)}</span>
+                                        </div>
+                                        <div className="flex justify-between items-center text-blue-900 font-semibold bg-blue-100/70 px-2 py-1 rounded-md">
+                                          <span>🔵 {language === 'hi' ? 'बाकी अंतर मुख्य बजट / खाते से कटेगा:' : 'From Bank/Cash Account (Main Budget):'}</span>
+                                          <span className="font-extrabold text-blue-950">- {formatINR(fromAccount)}</span>
+                                        </div>
+                                        <div className="flex justify-between items-center pt-1 text-[11px] font-bold text-slate-600">
+                                          <span>{language === 'hi' ? 'ठेकेदार का शेष एडवांस बचेगा:' : 'Contractor Rem. Adv:'}</span>
+                                          <span className="font-black text-emerald-700">₹0 (हिसाब चुकता)</span>
+                                        </div>
+                                      </div>
+
+                                      <div className="rounded-lg bg-amber-100/80 p-2 text-[10px] text-amber-950 font-medium leading-relaxed border border-amber-300/60">
+                                        {language === 'hi'
+                                          ? `💡 ठेकेदार के पास उपलब्ध ₹${fromAdv.toLocaleString('en-IN')} का एडवांस पूरा कट जाएगा (एडवांस शेष: ₹0)। बाकी बचा ₹${fromAccount.toLocaleString('en-IN')} आपके चुने गए खाते (${selectedAccountObj?.name || 'रोकड़/बैंक'}) से कटकर प्रोजेक्ट बजट में दर्ज होगा।`
+                                          : `💡 ₹${fromAdv.toLocaleString('en-IN')} settled from advance. Balance ₹${fromAccount.toLocaleString('en-IN')} will be deducted from ${selectedAccountObj?.name || 'account'} and added to project expenses.`}
+                                      </div>
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            })()}
+                          </div>
+                        )}
+                      </div>
                     </div>
                   )}
                 </div>
@@ -1144,22 +1650,68 @@ export const TransactionsPage = () => {
               {/* Accounts & Contact */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    {t('sourceAccount')} *
-                  </label>
-                  <select
-                    required
-                    value={formData.account}
-                    onChange={(e) => setFormData({ ...formData, account: e.target.value })}
-                    className="w-full rounded-xl border border-slate-200 px-3 py-2.5 text-xs text-slate-800 outline-none focus:border-blue-600"
-                  >
-                    <option value="">{t('selectAccount')}</option>
-                    {accounts.map((acc) => (
-                      <option key={acc._id} value={acc._id}>
-                        {acc.name} — {t('balance')}: {formatINR(acc.currentBalance)}
-                      </option>
-                    ))}
-                  </select>
+                  {(() => {
+                    const isAdvAdj = Boolean(formData.linkedAdvance || (isMaterialEntry && materialForm.paymentSourceType === 'contractor_advance'));
+                    const targetContact = materialForm.contractor || formData.contact;
+                    const chosenAdv = formData.linkedAdvance ? contactPayments.find((p) => p._id === formData.linkedAdvance) : null;
+                    const availableAdv = chosenAdv
+                      ? (chosenAdv.advanceDetails?.unsettledAmount !== undefined
+                          ? chosenAdv.advanceDetails.unsettledAmount
+                          : chosenAdv.amount - (chosenAdv.advanceDetails?.settledAmount || 0))
+                      : (contractorAdvanceMap[targetContact] || 0);
+                    const cost = Number(formData.amount) || 0;
+                    const isSplit = isAdvAdj && cost > availableAdv && availableAdv > 0;
+                    const splitRemainder = Math.max(0, cost - availableAdv);
+
+                    return (
+                      <>
+                        <label className="block text-xs font-semibold text-slate-700 mb-1 flex items-center justify-between">
+                          <span>{t('sourceAccount')} *</span>
+                          {isAdvAdj && (
+                            <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${
+                              isSplit
+                                ? 'bg-amber-100 text-amber-900 border-amber-300'
+                                : 'bg-purple-100 text-purple-700 border-purple-200'
+                            }`}>
+                              {isSplit
+                                ? (language === 'hi' ? `⚡ केवल ₹${splitRemainder.toLocaleString('en-IN')} खाते से कटेगा` : `⚡ ₹${splitRemainder.toLocaleString('en-IN')} from account`)
+                                : (language === 'hi' ? '✓ बैंक/रोकड़ से नहीं कटेगा (एडवांस से समायोजित)' : '✓ Balance untouched')}
+                            </span>
+                          )}
+                        </label>
+                        <select
+                          required
+                          value={formData.account}
+                          onChange={(e) => setFormData({ ...formData, account: e.target.value })}
+                          className={`w-full rounded-xl border px-3 py-2.5 text-xs outline-none ${
+                            isAdvAdj
+                              ? (isSplit
+                                  ? 'border-amber-400 bg-amber-50/40 text-slate-900 font-semibold focus:border-amber-500'
+                                  : 'border-purple-300 bg-purple-50/50 text-purple-950 font-semibold')
+                              : 'border-slate-200 text-slate-800 focus:border-blue-600'
+                          }`}
+                        >
+                          <option value="">{t('selectAccount')}</option>
+                          {accounts.map((acc) => (
+                            <option key={acc._id} value={acc._id}>
+                              {acc.name} — {t('balance')}: {formatINR(acc.currentBalance)}
+                            </option>
+                          ))}
+                        </select>
+                        {isAdvAdj && (
+                          <p className={`text-[10px] mt-1 font-medium ${isSplit ? 'text-amber-800 font-bold' : 'text-purple-700'}`}>
+                            {isSplit
+                              ? (language === 'hi'
+                                  ? `✓ कुल ₹${cost.toLocaleString('en-IN')} में से ₹${availableAdv.toLocaleString('en-IN')} एडवांस से कट गया, केवल शेष ₹${splitRemainder.toLocaleString('en-IN')} इस खाते से कटेगा।`
+                                  : `✓ ₹${availableAdv.toLocaleString('en-IN')} covered by advance. Remaining ₹${splitRemainder.toLocaleString('en-IN')} will be deducted from this account.`)
+                              : (language === 'hi'
+                                  ? '✓ यह पूरी राशि ठेकेदार के पिछले एडवांस से कटेगी। बैंक/कैश खाते से कुछ नहीं कटेगा।'
+                                  : '✓ Fully covered by contractor advance. Bank/cash balance untouched.')}
+                          </p>
+                        )}
+                      </>
+                    );
+                  })()}
                 </div>
 
                 {formData.type === 'transfer' ? (
@@ -1188,8 +1740,8 @@ export const TransactionsPage = () => {
                     </label>
                     <select
                       value={formData.contact}
-                      onChange={(e) => setFormData({ ...formData, contact: e.target.value })}
-                      className="w-full rounded-xl border border-slate-200 px-3 py-2.5 text-xs text-slate-800 outline-none focus:border-blue-600"
+                      onChange={(e) => handleContactChange(e.target.value)}
+                      className="w-full rounded-xl border border-slate-200 px-3 py-2.5 text-xs text-slate-800 outline-none focus:border-blue-600 font-semibold"
                     >
                       <option value="">{t('noContactLinked')}</option>
                       {contacts.map((c) => (
@@ -1201,6 +1753,147 @@ export const TransactionsPage = () => {
                   </div>
                 )}
               </div>
+
+              {/* Side-by-side or Dedicated dropdown for Person's Past Transactions */}
+              {formData.contact &&
+                formData.type !== 'transfer' &&
+                formData.type !== 'income' &&
+                !(isMaterialEntry && materialForm.paymentSourceType === 'contractor_advance') && (
+                <div className="rounded-2xl border-2 border-purple-200 bg-gradient-to-br from-purple-50/80 via-white to-purple-50/40 p-3.5 space-y-3 transition-all animate-in fade-in duration-200 shadow-sm">
+                  <div className="grid grid-cols-1 sm:grid-cols-12 gap-3 items-center">
+                    <div className="sm:col-span-5">
+                      <label className="block text-xs font-bold text-purple-950 mb-0.5 flex items-center gap-1.5">
+                        <HandCoins className="h-4 w-4 text-purple-600 shrink-0" />
+                        <span>
+                          {language === 'hi'
+                            ? `${contacts.find((c) => c._id === formData.contact)?.name || 'व्यक्ति'} का पिछला भुगतान चुनें`
+                            : `Select ${contacts.find((c) => c._id === formData.contact)?.name || 'Contact'}'s Past Payment`}
+                        </span>
+                      </label>
+                      <p className="text-[11px] text-purple-700">
+                        {language === 'hi'
+                          ? 'चुनें कि इस मटेरियल के पैसे इनमें से किस पिछले भुगतान में से दिए गए हैं:'
+                          : 'Select which past payment was used to fund this material:'}
+                      </p>
+                    </div>
+
+                    <div className="sm:col-span-7">
+                      <select
+                        value={formData.linkedAdvance || ''}
+                        onChange={(e) => handleLinkedTxnSelect(e.target.value)}
+                        className="w-full rounded-xl border-2 border-purple-300 bg-white px-3 py-2 text-xs font-bold text-slate-800 outline-none focus:border-purple-600 focus:ring-2 focus:ring-purple-200 shadow-sm"
+                      >
+                        <option value="">
+                          {language === 'hi'
+                            ? '➕ नया अलग खर्च / भुगतान (सीधे खाते से कटेगा)'
+                            : '➕ Direct New Expense (Deduct from bank/cash account)'}
+                        </option>
+                        {contactPayments.map((p) => {
+                          const dateStr = p.date
+                            ? new Date(p.date).toLocaleDateString('en-IN', {
+                                day: '2-digit',
+                                month: 'short',
+                                year: 'numeric',
+                              })
+                            : '';
+                          const typeLabel =
+                            p.type === 'advance' || p.isAdvance
+                              ? (language === 'hi' ? 'एडवांस' : 'Advance')
+                              : (language === 'hi' ? 'पेमेंट' : 'Payment');
+                          const accName = p.account?.name || (language === 'hi' ? 'खाता' : 'Account');
+                          const unsettled =
+                            p.advanceDetails?.unsettledAmount !== undefined
+                              ? p.advanceDetails.unsettledAmount
+                              : p.amount;
+                          const desc = p.description ? ` — "${p.description}"` : '';
+
+                          return (
+                            <option key={p._id} value={p._id}>
+                              📅 {dateStr} — ₹{Number(p.amount).toLocaleString('en-IN')} ({typeLabel} via {accName}) [शेष: ₹{Number(unsettled).toLocaleString('en-IN')}]{desc}
+                            </option>
+                          );
+                        })}
+                      </select>
+                      {contactPayments.length === 0 && !loadingContactPayments && (
+                        <p className="text-[10px] text-slate-500 mt-1 italic">
+                          {language === 'hi'
+                            ? 'इस व्यक्ति का कोई पिछला भुगतान रिकॉर्ड नहीं मिला। नया खर्च सीधे बैंक/कैश खाते से कटेगा।'
+                            : 'No past payments found for this person.'}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Selected Linked Transaction Live Breakdown */}
+                  {formData.linkedAdvance && (
+                    (() => {
+                      const selectedTxn = contactPayments.find((p) => p._id === formData.linkedAdvance);
+                      if (!selectedTxn) return null;
+                      const availableAmount =
+                        selectedTxn.advanceDetails?.unsettledAmount !== undefined
+                          ? selectedTxn.advanceDetails.unsettledAmount
+                          : selectedTxn.amount;
+                      const enteredAmount = Number(formData.amount) || 0;
+                      const remainingAfter = availableAmount - enteredAmount;
+
+                      return (
+                        <div className="rounded-xl border border-purple-200 bg-white p-3 space-y-2 text-xs">
+                          <div className="flex items-center justify-between pb-1.5 border-b border-purple-100">
+                            <span className="text-slate-600 font-medium">
+                              {language === 'hi' ? 'चुना गया पिछला भुगतान:' : 'Selected Past Payment:'}
+                            </span>
+                            <span className="font-extrabold text-purple-900">
+                              ₹{Number(selectedTxn.amount).toLocaleString('en-IN')}
+                              <span className="text-[11px] font-normal text-slate-500 ml-1">
+                                ({selectedTxn.account?.name || ''})
+                              </span>
+                            </span>
+                          </div>
+
+                          <div className="flex items-center justify-between">
+                            <span className="text-slate-600">
+                              {language === 'hi' ? 'उपलब्ध शेष रकम (Unsettled):' : 'Available Unsettled:'}
+                            </span>
+                            <span className="font-bold text-slate-800">
+                              ₹{Number(availableAmount).toLocaleString('en-IN')}
+                            </span>
+                          </div>
+
+                          {enteredAmount > 0 && (
+                            <>
+                              <div className="flex items-center justify-between text-rose-600">
+                                <span>{language === 'hi' ? 'इस मटेरियल/खर्च की रकम:' : 'This Expense:'}</span>
+                                <span className="font-bold">- ₹{Number(enteredAmount).toLocaleString('en-IN')}</span>
+                              </div>
+                              <div className="pt-1 border-t border-purple-100 flex items-center justify-between">
+                                <span className="font-bold text-slate-800">
+                                  {language === 'hi' ? 'बाकी बचेगा एडवांस:' : 'Remaining Advance:'}
+                                </span>
+                                <span
+                                  className={`font-black ${
+                                    remainingAfter < 0 ? 'text-rose-600' : 'text-emerald-700'
+                                  }`}
+                                >
+                                  ₹{Number(remainingAfter).toLocaleString('en-IN')}
+                                </span>
+                              </div>
+                            </>
+                          )}
+
+                          <div className="rounded-lg bg-emerald-50 border border-emerald-200 p-2 text-[11px] text-emerald-900 font-medium flex items-center gap-1.5 mt-1">
+                            <ShieldCheck className="h-4 w-4 text-emerald-600 shrink-0" />
+                            <span>
+                              {language === 'hi'
+                                ? 'यह राशि चुने गए पिछले भुगतान (₹' + Number(selectedTxn.amount).toLocaleString('en-IN') + ') से माइनस होगी। कंपनी बैंक/कैश बैलेंस से दोबारा नहीं कटेगी!'
+                                : 'Deducted from selected payment. No double deduction from company accounts!'}
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    })()
+                  )}
+                </div>
+              )}
 
               {/* Date, Category, Payment Method */}
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
@@ -1484,6 +2177,132 @@ export const TransactionsPage = () => {
                   <span>{activeTxn.contact?.name || t('selfGeneral')}</span>
                 </div>
               </div>
+
+              {activeTxn.isAdjustedFromAdvance && (
+                activeTxn.directPaidAmount > 0 ? (
+                  <div className="rounded-2xl border border-amber-300 bg-amber-50/90 p-4 space-y-3">
+                    <div className="font-bold text-amber-950 flex items-center justify-between text-xs border-b border-amber-200 pb-2">
+                      <div className="flex items-center gap-1.5">
+                        <Zap className="h-4 w-4 text-amber-600" />
+                        <span>{language === 'hi' ? '⚡ आंशिक एडवांस भुगतान (Split Advance Payment)' : 'Partial Advance Split Payment'}</span>
+                      </div>
+                      <span className="text-[10px] bg-amber-200 text-amber-900 px-2 py-0.5 rounded-full font-bold">Split Payment</span>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-2 text-center">
+                      <div className="bg-white/90 rounded-xl p-2.5 border border-purple-200">
+                        <div className="text-[10px] text-purple-700 font-semibold flex items-center justify-center gap-1">
+                          <HandCoins className="h-3 w-3 text-purple-600" />
+                          <span>{language === 'hi' ? 'ठेकेदार एडवांस से कटा' : 'From Advance'}</span>
+                        </div>
+                        <div className="text-sm font-black text-purple-900 mt-0.5">
+                          {formatINR(activeTxn.advanceDeductedAmount || (activeTxn.amount - activeTxn.directPaidAmount))}
+                        </div>
+                        <div className="text-[9px] text-purple-600">{activeTxn.contact?.name || 'ठेकेदार'}</div>
+                      </div>
+
+                      <div className="bg-white/90 rounded-xl p-2.5 border border-amber-300">
+                        <div className="text-[10px] text-amber-800 font-semibold flex items-center justify-center gap-1">
+                          <Building className="h-3 w-3 text-amber-600" />
+                          <span>{language === 'hi' ? 'कंपनी खाते/बजट से कटा' : 'From Bank/Budget'}</span>
+                        </div>
+                        <div className="text-sm font-black text-amber-950 mt-0.5">
+                          {formatINR(activeTxn.directPaidAmount)}
+                        </div>
+                        <div className="text-[9px] text-amber-700">{activeTxn.account?.name || 'कंपनी खाता'}</div>
+                      </div>
+                    </div>
+
+                    <div className="text-[11px] text-amber-900 leading-relaxed bg-white/70 p-2.5 rounded-xl border border-amber-200/60">
+                      {language === 'hi' ? (
+                        <>
+                          ठेकेदार के पास केवल <strong>{formatINR(activeTxn.advanceDeductedAmount || (activeTxn.amount - activeTxn.directPaidAmount))}</strong> का एडवांस शेष था, इसलिए वह एडवांस पूरा खप गया (0 हो गया)। बाकी बचे <strong>{formatINR(activeTxn.directPaidAmount)}</strong> कंपनी के <strong>{activeTxn.account?.name || 'खाते'}</strong> (मुख्य बजट) से काटे गए हैं।
+                        </>
+                      ) : (
+                        <>
+                          Contractor had only <strong>{formatINR(activeTxn.advanceDeductedAmount || (activeTxn.amount - activeTxn.directPaidAmount))}</strong> in advance, which was fully exhausted. Remaining <strong>{formatINR(activeTxn.directPaidAmount)}</strong> was paid directly from <strong>{activeTxn.account?.name || 'account'}</strong> (main budget).
+                        </>
+                      )}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="rounded-2xl border border-purple-200 bg-purple-50/80 p-3.5 space-y-2">
+                    <div className="font-bold text-purple-950 flex items-center justify-between text-xs">
+                      <div className="flex items-center gap-1.5">
+                        <HandCoins className="h-4 w-4 text-purple-600" />
+                        <span>{language === 'hi' ? 'ठेकेदार एडवांस से पूरा समायोजित (नो डबल डिडक्शन)' : '100% Adjusted from Contractor Advance'}</span>
+                      </div>
+                      <span className="text-[10px] bg-purple-200 text-purple-900 px-2 py-0.5 rounded-full font-bold">100% Advance</span>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-2 text-center my-1.5">
+                      <div className="bg-white/90 rounded-xl p-2 border border-purple-200">
+                        <div className="text-[10px] text-purple-700 font-semibold">{language === 'hi' ? 'एडवांस से कटा' : 'From Advance'}</div>
+                        <div className="text-sm font-black text-purple-900">{formatINR(activeTxn.amount)}</div>
+                      </div>
+                      <div className="bg-white/90 rounded-xl p-2 border border-slate-200">
+                        <div className="text-[10px] text-slate-500 font-semibold">{language === 'hi' ? 'बैंक/बजट से कटौती' : 'Bank/Budget Deduction'}</div>
+                        <div className="text-sm font-black text-slate-400">₹0 (शून्य)</div>
+                      </div>
+                    </div>
+
+                    <p className="text-[11px] text-purple-800 leading-relaxed">
+                      {language === 'hi'
+                        ? `यह खर्च ठेकेदार (${activeTxn.contact?.name || 'ठेकेदार'}) को पहले दिए गए एडवांस से पूरा काटा गया है। कंपनी के बैंक/रोकड़ खाते या मुख्य बजट से दोबारा कोई कटौती नहीं हुई है।`
+                        : `This expense was fully settled from contractor's advance. No double deduction from bank or main project budget.`}
+                    </p>
+                  </div>
+                )
+              )}
+
+              {/* Advance details & settlements breakdown */}
+              {(activeTxn.isAdvance || activeTxn.type === 'advance') && (() => {
+                const advRec = advances.find((a) => a._id === activeTxn._id);
+                const settledAmt = activeTxn.advanceDetails?.settledAmount || advRec?.advanceDetails?.settledAmount || 0;
+                const unsettledAmt = activeTxn.advanceDetails?.unsettledAmount ?? advRec?.advanceDetails?.unsettledAmount ?? (activeTxn.amount - settledAmt);
+                const settlementsList = advRec?.settlements || [];
+
+                return (
+                  <div className="rounded-2xl border border-amber-200 bg-amber-50/60 p-3.5 space-y-2.5">
+                    <div className="font-bold text-amber-950 flex items-center gap-1.5 text-xs">
+                      <HandCoins className="h-4 w-4 text-amber-600" />
+                      <span>{language === 'hi' ? 'पेशगी (एडवांस) एवं खर्च हिसाब' : 'Advance & Settlement Breakdown'}</span>
+                    </div>
+
+                    <div className="grid grid-cols-3 gap-2 bg-white rounded-xl p-2.5 border border-amber-200 text-center">
+                      <div>
+                        <div className="text-[10px] text-slate-400 font-semibold">{language === 'hi' ? 'मूल एडवांस' : 'Original Adv'}</div>
+                        <div className="text-xs font-black text-slate-900">{formatINR(activeTxn.amount)}</div>
+                      </div>
+                      <div>
+                        <div className="text-[10px] text-emerald-600 font-semibold">{language === 'hi' ? 'खर्च में चुकता' : 'Settled'}</div>
+                        <div className="text-xs font-black text-emerald-700">{formatINR(settledAmt)}</div>
+                      </div>
+                      <div>
+                        <div className="text-[10px] text-amber-700 font-semibold">{language === 'hi' ? 'बकाया खुला' : 'Unsettled'}</div>
+                        <div className="text-xs font-black text-amber-800">{formatINR(unsettledAmt)}</div>
+                      </div>
+                    </div>
+
+                    {settlementsList.length > 0 && (
+                      <div className="space-y-1.5 pt-1">
+                        <div className="text-[11px] font-bold text-slate-700">
+                          {language === 'hi' ? `इस एडवांस में से हुआ खर्च (${settlementsList.length}):` : `Settlements from this advance (${settlementsList.length}):`}
+                        </div>
+                        {settlementsList.map((s, idx) => (
+                          <div key={s._id || idx} className="bg-white rounded-lg p-2 border border-slate-200 text-[11px] space-y-0.5 shadow-xs">
+                            <div className="flex justify-between items-center font-bold">
+                              <span className="text-emerald-700">✓ {formatINR(s.settledAmount)}</span>
+                              <span className="text-slate-400 text-[10px] font-normal">{formatDateTime(s.settledAt)}</span>
+                            </div>
+                            {s.notes && <div className="text-slate-600 italic">"{s.notes}"</div>}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
 
               {/* Attachments */}
               {activeTxn.attachments && activeTxn.attachments.length > 0 && (
